@@ -22,16 +22,20 @@ public:
         path_publisher_ = this->create_publisher<nav_msgs::msg::Path>("path", 10);
         odom_subscription_ = this->create_subscription<nav_msgs::msg::Odometry>(
             "/odom", 10, std::bind(&RoverSearcher::odom_callback, this, std::placeholders::_1));
+        aruco_subscription_ = this->create_subscription<geometry_msgs::msg::PoseStamped>(
+            "/aruco_position", 10, std::bind(&RoverSearcher::aruco_callback, this, std::placeholders::_1));
         timer_ = this->create_wall_timer(
             std::chrono::milliseconds(100),
             std::bind(&RoverSearcher::control_loop, this));
 
-        path_msg_.header.frame_id = "odom"; // Use the "odom" frame for visualization
+        path_msg_.header.frame_id = "odom";
     }
 
 private:
+
     void odom_callback(const nav_msgs::msg::Odometry::SharedPtr msg)
     {
+
         if (phase_ == 0) // Phase 0 - Initialize position
         {
             initial_x_ = msg->pose.pose.position.x;
@@ -56,23 +60,56 @@ private:
             angle_rotated_ = 2 * M_PI - angle_rotated_;
         }
 
-        // Add the current pose to the path for visualization
         geometry_msgs::msg::PoseStamped pose_stamped;
         pose_stamped.header.stamp = this->now();
-        pose_stamped.header.frame_id = "odom"; // Frame for RViz visualization
-        pose_stamped.pose = msg->pose.pose;   // Use the odometry pose
+        pose_stamped.header.frame_id = "odom";
+        pose_stamped.pose = msg->pose.pose;
         path_msg_.poses.push_back(pose_stamped);
 
-        // Publish the path
         path_msg_.header.stamp = this->now();
         path_publisher_->publish(path_msg_);
+    }
+
+    void aruco_callback(const geometry_msgs::msg::PoseStamped::SharedPtr msg)
+    {
+        detected_aruco_ = true;
+        goal_x_ = msg->pose.position.x;
+        goal_y_ = msg->pose.position.y;
+        RCLCPP_INFO(this->get_logger(), "Search completed. ArUco found at (%f, %f, %f)", goal_x_, goal_y_, msg->pose.position.z);
     }
 
     void control_loop()
     {
         auto message = geometry_msgs::msg::Twist();
 
-        if (dist_from_center_ >= dist_thresh && phase_ != 4)
+        if(detected_aruco_ == true && phase_ != 5)
+        {
+            phase_ = 5;
+            desired_yaw = std::atan2(goal_x_ - current_y_, goal_y_ - current_x_);
+            initial_yaw_ = current_yaw_;
+        }
+
+        if (phase_ == 5) // going to aruco
+        {
+
+            if (std::abs(current_yaw_ - desired_yaw) >= 0.1)
+            {
+                message.linear.x = 0.0;
+                message.angular.z = turning_speed;
+            }
+            else if (get_euclidean_distance(current_x_, current_y_, goal_x_, goal_y_) >= 0.1)
+            {
+                message.linear.x = forw_speed;
+                message.angular.z = 0.0;
+            }
+            else
+            {
+                message.linear.x = 0.0;
+                message.angular.z = 0.0;
+                RCLCPP_INFO(this->get_logger(), "Reached Aruco.");
+            }
+        }   
+        else if (dist_from_center_ >= dist_thresh && phase_ != 4)
         {
             desired_yaw = std::atan2(last_known_coord_y_ - current_y_, last_known_coord_x_ - current_x_);
             initial_yaw_ = current_yaw_;
@@ -80,6 +117,7 @@ private:
             side_length_ = orig_side_len;
             phase_ = 4;
         }
+
         if (phase_ == 1) // Phase 1 - Move forward
         {
             message.linear.x = forw_speed;
@@ -134,7 +172,7 @@ private:
                 side_length_ += exp_step;
             }
         }
-        else if (phase_ == 4)
+        else if (phase_ == 4) //Out of Bounds
         {
             if (std::abs(current_yaw_ - desired_yaw) >= 0.1)
             {
@@ -172,6 +210,7 @@ private:
     rclcpp::Publisher<geometry_msgs::msg::Twist>::SharedPtr publisher_;
     rclcpp::Publisher<nav_msgs::msg::Path>::SharedPtr path_publisher_;
     rclcpp::Subscription<nav_msgs::msg::Odometry>::SharedPtr odom_subscription_;
+    rclcpp::Subscription<geometry_msgs::msg::PoseStamped>::SharedPtr aruco_subscription_;
     rclcpp::TimerBase::SharedPtr timer_;
 
     const double exp_step = 0.3;
@@ -189,6 +228,9 @@ private:
     double desired_yaw;
     const double forw_speed = 0.2;
     const double turning_speed = 0.5;
+    double goal_x_, goal_y_;
+
+    bool detected_aruco_ = false;
 
     nav_msgs::msg::Path path_msg_;
 };
